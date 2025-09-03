@@ -82,4 +82,4 @@ training:
   mixed_precision: bf16 # ["no", "fp16", "bf16"]
   allow_tf32: True 
   validation_steps: 500
-  checkpoint_list: [100000, 200000, 400000, 500000, 800000, 950000, 1000000]
+  checkpoint_list: [100000, 250000, 500000]
