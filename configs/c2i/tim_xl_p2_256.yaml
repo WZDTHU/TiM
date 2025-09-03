@@ -54,7 +54,7 @@ data:
     image_size: 256
   dataloader:
     num_workers: 4
-    batch_size: 32  # Batch size (per device) for the training dataloader.
+    batch_size: 64  # Batch size (per device) for the training dataloader.
 
   
   
