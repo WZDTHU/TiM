@@ -1,0 +1,504 @@
+#!/usr/bin/env python
+# coding=utf-8
+# Copyright 2023 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+
+import argparse
+import copy
+import functools
+import gc
+import itertools
+import json
+import logging
+import math
+import os
+import time
+import random
+import shutil
+import importlib
+import csv
+import numpy as np
+import os.path as osp
+from pathlib import Path
+from typing import List, Union
+from packaging import version
+from tqdm.auto import tqdm
+from copy import deepcopy
+from omegaconf import OmegaConf
+from einops import rearrange, repeat
+
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint
+import torchvision.transforms.functional as TF
+from torch.utils.data import default_collate, Dataset
+from torchvision import transforms
+from torchvision.transforms import Normalize
+
+import accelerate
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import ProjectConfiguration, set_seed
+
+import transformers
+
+import diffusers
+from diffusers.optimization import get_scheduler
+from diffusers.utils.torch_utils import randn_tensor
+from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils.import_utils import is_xformers_available
+
+from timeit import default_timer as timer
+
+from tim.schedulers.transition import TransitionSchedule
+from tim.data.t2i_data import T2ILoader
+from tim.models.nvidia_radio.hubconf import radio_model
+from tim.models.vae import get_sd_vae, get_dc_ae, sd_vae_encode, dc_ae_encode
+from tim.models.utils.text_encoders import load_text_encoder, encode_prompt
+from tim.utils.misc_utils import (
+    get_obj_from_str, instantiate_from_config, init_from_ckpt
+)
+from tim.utils.train_utils import update_ema, get_fsdp_plugin
+from tim.utils.gpu_memory_monitor import build_gpu_memory_monitor
+
+
+# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
+check_min_version("0.18.0.dev0")
+
+logger = get_logger(__name__)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    # ----General Training Arguments----
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="The config file for training.",
+    )
+    parser.add_argument(
+        "--project_dir",
+        type=str,
+        default="t2i_linear_attention",
+        help="The output directory where the model predictions and checkpoints will be written.",
+    )
+    parser.add_argument(
+        "--seed", 
+        type=int, 
+        default=None, 
+        help="A seed for reproducible training."
+    )
+    args = parser.parse_args()
+    return args
+
+
+
+def main(args):
+    project_dir = args.project_dir
+    config = OmegaConf.load(args.config)
+    model_config = config.model 
+    data_config = config.data
+    train_config = config.training
+
+    config_dir = osp.join(project_dir, 'configs')
+    checkpoint_dir = osp.join(project_dir, 'checkpoints')
+    logging_dir = osp.join(project_dir, 'logs')
+    sample_dir = osp.join(project_dir, 'samples')
+
+    if getattr(train_config, 'fsdp_config', None) != None:
+        fsdp_plugin = get_fsdp_plugin(train_config.fsdp_config, train_config.mixed_precision)
+    else:
+        fsdp_plugin = None
+
+
+    accelerator_project_config = ProjectConfiguration(project_dir=project_dir, logging_dir=logging_dir)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=train_config.gradient_accumulation_steps,
+        mixed_precision=train_config.mixed_precision,
+        log_with=train_config.tracker,
+        project_config=accelerator_project_config,
+        split_batches=True,  # It's important to set this to True when using webdataset to get the right number of steps for lr scheduling. If set to False, the number of steps will be devide by the number of processes assuming batches are multiplied by the number of processes
+        fsdp_plugin=fsdp_plugin,
+    )
+    
+    
+    
+
+    # Handle the repository creation
+    if accelerator.is_main_process:
+        os.makedirs(project_dir, exist_ok=True)
+        os.makedirs(config_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(logging_dir, exist_ok=True)
+        os.makedirs(sample_dir, exist_ok=True)
+        OmegaConf.save(config=config, f=osp.join(config_dir, "config.yaml"))
+    
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        transformers.utils.logging.set_verbosity_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        transformers.utils.logging.set_verbosity_error()
+        diffusers.utils.logging.set_verbosity_error()
+
+    # If passed along, set the training seed now.
+    if args.seed is not None:
+        set_seed(args.seed)
+
+    if train_config.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    total_batch_size = (
+        data_config.dataloader.batch_size * 
+        accelerator.num_processes * 
+        train_config.gradient_accumulation_steps
+    )
+    if train_config.scale_lr:
+        learning_rate = (
+            train_config.learning_rate * 
+            total_batch_size / train_config.learning_rate_base_batch_size
+        )
+    else:
+        learning_rate = train_config.learning_rate
+    
+
+    # prepare vae
+    if 'dc-ae' in model_config.vae_dir:
+        dc_ae = get_dc_ae(model_config.vae_dir, dtype=torch.float32, device=accelerator.device)
+        dc_ae.enable_tiling(2048, 2048, 2048, 2048)
+        encode_func = functools.partial(dc_ae_encode, dc_ae)
+    elif 'sd-vae' in model_config.vae_dir:
+        sd_vae = get_sd_vae(model_config.vae_dir, dtype=torch.float32, device=accelerator.device)
+        encode_func = functools.partial(sd_vae_encode, sd_vae)
+    else: raise
+    
+        
+    # load text-encoder
+    text_encoder, tokenizer = load_text_encoder(
+        text_encoder_dir=model_config.text_encoder_dir, device=accelerator.device, weight_dtype=torch.bfloat16
+    )
+    null_cap_feat, null_cap_mask = encode_prompt(
+        tokenizer, text_encoder, accelerator.device, torch.bfloat16, 
+        [""], model_config.use_last_hidden_state, 
+        max_seq_length=model_config.max_seq_length
+    )
+    
+    
+    # prepare model, dataloader, optimizer and scheduler
+    model = instantiate_from_config(model_config.network).to(device=accelerator.device)
+    if getattr(model_config, 'ckpt', None) != None:
+        init_from_ckpt(model, checkpoint_dir=model_config.ckpt, verbose=True)
+    model.train()
+    if model_config.use_ema:
+        ema_model = deepcopy(model)
+        ema_model.train()
+        ema_model.requires_grad_(False)
+    # Handle mixed precision and device placement
+    # Check that all trainable models are in full precision
+    low_precision_error_string = (
+        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
+        " doing mixed precision training, copy of the weights should still be float32."
+    )
+    if accelerator.unwrap_model(model).dtype != torch.float32:
+        raise ValueError(
+            f"Controlnet loaded as datatype {accelerator.unwrap_model(model).dtype}. {low_precision_error_string}"
+        )
+    
+    if accelerator.is_main_process:
+        total_params = 0
+        trainable_params = 0
+        projector_params = 0
+        for name, param in model.named_parameters():
+            print(name, param.requires_grad)
+            total_params += param.numel()  # Total number of elements in the parameter
+            if param.requires_grad:          # Check if the parameter is trainable
+                trainable_params += param.numel()
+            if 'projector' in name:
+                projector_params += param.numel()
+        print(trainable_params, total_params, total_params-projector_params, trainable_params/total_params)
+    
+    # Optimizer creation
+    target_optimizer = train_config.optimizer.get('target', 'torch.optim.AdamW')
+    optimizer = get_obj_from_str(target_optimizer)(
+        model.parameters(), lr=learning_rate, 
+        **train_config.optimizer.get("params", dict())
+    )
+
+    # Dataset creation and data processing
+    # Here, we compute not just the text embeddings but also the additional embeddings
+    global_steps = 0
+    if train_config.resume_from_checkpoint:
+        # normal read with safety check
+        if train_config.resume_from_checkpoint != "latest":
+            resume_from_path = os.path.basename(train_config.resume_from_checkpoint)
+        else:   # Get the most recent checkpoint
+            dirs = os.listdir(checkpoint_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            resume_from_path = osp.join(checkpoint_dir, dirs[-1]) if len(dirs) > 0 else None
+
+        if resume_from_path is None:
+            logger.info(
+                f"Checkpoint '{train_config.resume_from_checkpoint}' does not exist. Starting a new training run."
+            )
+            train_config.resume_from_checkpoint = None
+        else:
+            global_steps = int(resume_from_path.split("-")[-1]) # gs not calculate the gradient_accumulation_steps
+            logger.info(f"Resuming from steps: {global_steps}")
+    
+    get_train_dataloader = T2ILoader(data_config)
+    train_dataloader = get_train_dataloader.train_dataloader(
+        rank=accelerator.process_index, world_size=accelerator.num_processes, 
+        global_batch_size=total_batch_size, max_steps=train_config.max_train_steps, 
+        resume_steps=global_steps, seed=args.seed
+    )
+
+    # LR Scheduler creation
+    # Scheduler and math around the number of training steps.
+    lr_scheduler = get_scheduler(
+        train_config.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=train_config.lr_warmup_steps,
+        num_training_steps=train_config.max_train_steps,
+    )
+
+    # Prepare for training
+    # Prepare everything with our `accelerator`.
+    if model_config.use_ema:
+        ema_model, model, optimizer, lr_scheduler = accelerator.prepare(
+            ema_model, model, optimizer, lr_scheduler
+        )
+    else:
+        model, optimizer, lr_scheduler = accelerator.prepare(
+            model, optimizer, lr_scheduler
+        )
+
+    # transport 
+    transport = instantiate_from_config(model_config.transport)
+    loss_fn = TransitionSchedule(transport=transport, **OmegaConf.to_container(model_config.unified_dcm_loss))
+    
+    # image encoder
+    encoder = radio_model(version=model_config.enc_dir, progress=True, support_packing=False)
+    encoder.to(device=accelerator.device).eval()
+    encoder.requires_grad_(False)
+    
+
+    # We need to initialize the trackers we use, and also store our configuration.
+    # The trackers initializes automatically on the main process.
+    if accelerator.is_main_process and getattr(train_config, 'tracker', 'wandb') != None:
+        tracker_project_name = train_config.tracker_project_name
+        tracker_init_kwargs = OmegaConf.to_container(train_config.tracker_kwargs)
+        tracker_init_kwargs[train_config.tracker]['name'] = project_dir.split('/')[-1]
+        accelerator.init_trackers(
+            tracker_project_name, 
+            config=OmegaConf.to_container(config), 
+            init_kwargs=tracker_init_kwargs
+        )
+
+    
+    # initialize GPU memory monitor before applying parallelisms to the model
+    gpu_memory_monitor = build_gpu_memory_monitor(logger)
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+
+    # 15. Train!
+    logger.info("***** Running training *****")
+    logger.info(f"  Num batches each epoch = {get_train_dataloader.train_len()/data_config.dataloader.batch_size}")
+    logger.info(f"  Dataset Length = {get_train_dataloader.train_len()}")
+    logger.info(f"  Instantaneous batch size per device = {data_config.dataloader.batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(f"  Gradient Accumulation steps = {train_config.gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {train_config.max_train_steps}")
+    logger.info(
+        "  GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
+
+    gpu_memory_monitor.reset_peak_stats()
+    data_loading_times = []
+    text_enc_times = []
+    feat_enc_times = []
+    
+    # Potentially load in the weights and states from a previous save
+    if train_config.resume_from_checkpoint and resume_from_path != None:
+        accelerator.print(f"Resuming from checkpoint {resume_from_path}")
+        accelerator.load_state(resume_from_path)
+
+    progress_bar = tqdm(
+        range(0, train_config.max_train_steps),
+        initial=global_steps,
+        desc="Steps",
+        # Only show the progress bar once on each machine.
+        disable=not accelerator.is_main_process,
+    )
+
+    
+    for batch in train_dataloader:
+        time_last_log = timer()
+        data_load_start = timer()
+        # load dataset from batch
+        batch_image = batch['image'].to(accelerator.device)
+        batch_caption = batch['caption']
+        batch_latent = encode_func(batch_image).contiguous()
+        noises = torch.randn_like(batch_latent)
+        batch_size = batch_image.shape[0]
+
+        text_enc_start = timer()
+        
+        # enable CFG
+        mask = torch.rand(batch_size) < model_config.proportion_empty_prompts
+        batch_caption = ["" if mask[i].item() else cap for i, cap in enumerate(batch_caption)]
+        batch_cap_feat, batch_cap_mask = encode_prompt(
+            tokenizer, text_encoder, accelerator.device, torch.bfloat16, 
+            batch_caption, model_config.use_last_hidden_state, 
+            max_seq_length=model_config.max_seq_length
+        )
+        cur_max_seq_len = batch_cap_mask.sum(dim=-1).max()
+        batch_cap_feat = batch_cap_feat[:, : cur_max_seq_len]
+        
+        
+        cur_null_cap_feat = null_cap_feat[:, : cur_max_seq_len]
+        cur_null_cap_feat = cur_null_cap_feat.expand(batch_size, cur_max_seq_len, null_cap_feat.shape[-1])
+        
+        text_enc_times.append(timer() - text_enc_start)
+
+        data_loading_times.append(timer() - data_load_start)
+                
+        feat_enc_start = timer()
+        with torch.no_grad(), accelerator.autocast():
+            raw_images = (batch_image + 1.0) / 2.0
+            _, _, H, W = batch_latent.shape
+            encoder_image_size = (int(H * 16), int(W * 16))
+            raw_images = F.interpolate(raw_images, encoder_image_size, mode='bicubic')
+            _, h_target = encoder(raw_images)
+        feat_enc_times.append(timer() - feat_enc_start)
+
+        with accelerator.accumulate(model):
+            # forward and calculate loss
+            model_kwargs = dict(y=batch_cap_feat, return_zs=True)
+            ema_kwargs = dict(y=batch_cap_feat, return_zs=False)
+            null_kwargs = dict(y=cur_null_cap_feat, return_zs=False)
+            unwrapped_model = accelerator.unwrap_model(model)
+            weighted_loss, proj_loss, loss_dict = loss_fn(
+                model, ema_model, unwrapped_model, batch_size, batch_latent, noises, 
+                model_kwargs, use_dir_loss=True, h_target=h_target,
+                ema_kwargs=ema_kwargs, null_kwargs=null_kwargs,
+            )
+            loss = weighted_loss + model_config.proj_coeff * proj_loss
+            accelerator.backward(loss)
+            if accelerator.sync_gradients and train_config.max_grad_norm > 0:
+                all_norm = accelerator.clip_grad_norm_(model.parameters(), train_config.max_grad_norm)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        # Checks if the accelerator has performed an optimization step behind the scenes
+        if accelerator.sync_gradients:
+            # 20.4.15. Make EMA update to target student model parameters
+            if model_config.use_ema:
+                update_ema(ema_model, model, model_config.ema_decay)
+            global_steps += 1
+            time_delta = timer() - time_last_log
+            sps = batch_size / time_delta
+            time_data_loading = np.mean(data_loading_times)
+            time_feat_enc = np.mean(feat_enc_times)
+            time_data_loading_pct = 100 * time_data_loading / time_delta
+            time_feat_enc_pct = 100 * time_feat_enc / time_delta
+            gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+            
+            if global_steps % train_config.checkpointing_steps == 0:
+                # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                if accelerator.is_main_process and train_config.checkpoints_total_limit is not None:
+                    checkpoints = os.listdir(checkpoint_dir)
+                    checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                    if len(checkpoints) >= train_config.checkpoints_total_limit:
+                        num_to_remove = len(checkpoints) - train_config.checkpoints_total_limit + 1
+                        removing_checkpoints = checkpoints[0:num_to_remove]
+
+                        logger.info(
+                            f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                        )
+                        logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                        for removing_checkpoint in removing_checkpoints:
+                            removing_checkpoint = osp.join(checkpoint_dir, removing_checkpoint)
+                            try:
+                                shutil.rmtree(removing_checkpoint)
+                            except:
+                                pass
+                save_path = osp.join(checkpoint_dir, f"checkpoint-{global_steps}")
+                if accelerator.is_main_process:
+                    os.makedirs(save_path, exist_ok=True)
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
+                time.sleep(10)
+                torch.cuda.empty_cache()
+                
+
+            if global_steps in train_config.checkpoint_list:
+                save_path = os.path.join(checkpoint_dir, f"save-checkpoint-{global_steps}")
+                if accelerator.is_main_process:
+                    os.makedirs(save_path, exist_ok=True)
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
+
+                time.sleep(10)
+                torch.cuda.empty_cache()
+            
+                
+            logs = {
+                # loss and lr
+                "loss_weighted": loss_dict['weighted_loss'], 
+                "loss_denoising": loss_dict['denoising_loss'], 
+                "loss_projector": loss_dict['proj_loss'], 
+                "lr": lr_scheduler.get_last_lr()[0],
+                # time and status
+                "sps": sps,
+                "data_loading(s)": time_data_loading,
+                "data_loading(%)": time_data_loading_pct,
+                "time_feat_enc(s)": time_feat_enc,
+                "time_feat_enc(%)": time_feat_enc_pct,
+                "memory_max_active(GiB)": gpu_mem_stats.max_active_gib,
+                "memory_max_active(%)": gpu_mem_stats.max_active_pct,
+                "memory_max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
+                "memory_max_reserved(%)": gpu_mem_stats.max_reserved_pct,
+                "memory_num_alloc_retries": gpu_mem_stats.num_alloc_retries,
+                "memory_num_ooms": gpu_mem_stats.num_ooms
+            }
+            if accelerator.sync_gradients and train_config.max_grad_norm > 0:
+                logs.update({'grad_norm': all_norm.item()})
+            progress_bar.set_postfix(**logs)
+            progress_bar.update(1)
+            accelerator.log(logs, step=global_steps)
+        if global_steps >= train_config.max_train_steps:
+            break
+
+    # Create the pipeline using using the trained modules and save it.
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    main(args)
+
