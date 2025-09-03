@@ -176,8 +176,6 @@ cython_debug/
 
 *.json
 *.svg
-*.png 
-*.jpg
 /checkpoints
 /workdir
 /datasets
