@@ -5,7 +5,7 @@ export MASTER_PORT=60563
 mkdir -p workdir/t2i/tim_t2i
 CMD=" \
     projects/train/trainer_t2i.py \
-    --config configs/t2i/tim_t2i.yaml \
+    --config configs/t2i/tim_xl_p1_t2i.yaml \
     --project_dir workdir/t2i/tim_t2i \
     --seed 0 \
     "
