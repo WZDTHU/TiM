@@ -7,7 +7,7 @@
   &ensp; <b>&middot;</b> &ensp;
   <a href="https://invictus717.github.io" target="_blank">Yiyuan&nbsp;Zhang</a><sup>1,2,*,‡</sup> 
   &ensp; <b>&middot;</b> &ensp;
-  <a href="https://yuexy.github.io/" target="_blank">Xiaoyu&nbsp;Yue</a><sup>1,2</sup> 
+  <a href="https://yuexy.github.io/" target="_blank">Xiaoyu&nbsp;Yue</a><sup>2,3</sup> 
   &ensp; <b>&middot;</b> &ensp;
   <a href="https://xyue.io" target="_blank">Xiangyu&nbsp;Yue</a><sup>1</sup> 
   &ensp; <b>&middot;</b> &ensp;
@@ -17,7 +17,7 @@
   &ensp; <b>&middot;</b> &ensp;
   <a href="http://leibai.site" target="_blank">Lei&nbsp;Bai</a><sup>2,†</sup> 
   
-  <sup>1</sup> MMLab CUHK &emsp; <sup>2</sup>Shanghai AI Lab <br>
+  <sup>1</sup> MMLab CUHK &emsp; <sup>2</sup>Shanghai AI Lab &emsp; <sup>3</sup>USYD <br>
   <sup>*</sup>Correspondance &emsp; <br>
 </div>
 
@@ -31,7 +31,7 @@
 </h3>
 <br>
 
-<b>Summary</b>: We propose Transition Models (TiM), a novel generative model that learns to navigate the entire generative trajectory with unprecedented flexibility. Despite having only 865M parameters, TiM achieves state-of-the-art performance, surpassing leading models such as SD3.5 (8B parameters) and FLUX.1 (12B parameters) across all evaluated step counts on GenEval benchmark.
+<b>Summary</b>: We propose Transition Models (TiM), a novel generative model that learns to navigate the entire generative trajectory with unprecedented flexibility. Our Transition Models (TiM) are trained to master arbitrary state-to-state transitions. This approach allows TiM to learn the entire solution manifold of the generative process, unifying the few-step and many-step regimes within a single, powerful model. Despite having only 865M parameters, TiM achieves state-of-the-art performance, surpassing leading models such as SD3.5 (8B parameters) and FLUX.1 (12B parameters) across all evaluated step counts on GenEval benchmark.
 Importantly, unlike previous few-step generators, TiM demonstrates monotonic quality improvement as the sampling budget increases. Additionally, when employing our native-resolution strategy, TiM delivers exceptional fidelity at resolutions up to $4096\times4096$.
 
 ![Figure](./assets/tim_demo.png)
