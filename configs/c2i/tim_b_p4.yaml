@@ -44,7 +44,7 @@ data:
   dataset:
     latent_dir: datasets/imagenet1k/sd-vae-ft-ema-256x256
     image_dir: datasets/imagenet1k/images/train
-    image_size: 128
+    image_size: 256
   dataloader:
     num_workers: 16
     batch_size: 256  # Batch size (per device) for the training dataloader.

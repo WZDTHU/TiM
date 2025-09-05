@@ -51,7 +51,7 @@ data:
   dataset:
     latent_dir: datasets/imagenet1k/dc-ae-f32c32-sana-1.1-diffusers-512x512
     image_dir: datasets/imagenet1k/images/train
-    image_size: 256
+    image_size: 512
   dataloader:
     num_workers: 4
     batch_size: 64  # Batch size (per device) for the training dataloader.
