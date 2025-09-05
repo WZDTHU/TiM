@@ -18,23 +18,27 @@
   <a href="http://leibai.site" target="_blank">Lei&nbsp;Bai</a><sup>2,†</sup> 
   
   <sup>1</sup> MMLab CUHK &emsp; <sup>2</sup>Shanghai AI Lab &emsp; <sup>3</sup>USYD <br>
-  <sup>*</sup>Correspondance &emsp; <br>
+  <sup>*</sup>Equal Contribution &emsp; <sup>‡</sup>Project Lead &emsp; <sup>†</sup>Corresponding Authors &emsp; <br>
 </div>
 
 
 
 <h3 align="center">
 <!-- [<a href="https://wzdthu.github.io/NiT">project page</a>]&emsp; -->
-[<a href="https://arxiv.org/abs/2506.03131">arXiv</a>]&emsp;
+[<a href="https://arxiv.org/abs/2509.04394">arXiv</a>]&emsp;
 [<a href="https://huggingface.co/GoodEnough/TiM-T2I">Model</a>]&emsp;
 [<a href="https://huggingface.co/datasets/GoodEnough/TiM-Toy-T2I-Dataset">Dataset</a>]&emsp;
 </h3>
 <br>
 
-<b>Summary</b>: We propose Transition Models (TiM), a novel generative model that learns to navigate the entire generative trajectory with unprecedented flexibility. Our Transition Models (TiM) are trained to master arbitrary state-to-state transitions. This approach allows TiM to learn the entire solution manifold of the generative process, unifying the few-step and many-step regimes within a single, powerful model. Despite having only 865M parameters, TiM achieves state-of-the-art performance, surpassing leading models such as SD3.5 (8B parameters) and FLUX.1 (12B parameters) across all evaluated step counts on GenEval benchmark.
-Importantly, unlike previous few-step generators, TiM demonstrates monotonic quality improvement as the sampling budget increases. Additionally, when employing our native-resolution strategy, TiM delivers exceptional fidelity at resolutions up to $4096\times4096$.
+<b>Highlights</b>: We propose Transition Models (TiM), a novel generative model that learns to navigate the entire generative trajectory with unprecedented flexibility. 
+* Our Transition Models (TiM) are trained to master arbitrary state-to-state transitions. This approach allows TiM to learn the entire solution manifold of the generative process, unifying the few-step and many-step regimes within a single, powerful model. 
+  ![Figure](./assets/illustration.png)
+* Despite having only 865M parameters, TiM achieves state-of-the-art performance, surpassing leading models such as SD3.5 (8B parameters) and FLUX.1 (12B parameters) across all evaluated step counts on GenEval benchmark.Importantly, unlike previous few-step generators, TiM demonstrates monotonic quality improvement as the sampling budget increases. 
+  ![Figure](./assets/nfe_demo.png)
+* Additionally, when employing our native-resolution strategy, TiM delivers exceptional fidelity at resolutions up to $4096\times4096$.
+  ![Figure](./assets/tim_demo.png)
 
-![Figure](./assets/tim_demo.png)
 
 ## 🚨 News
 
@@ -253,13 +257,13 @@ If you find the project useful, please kindly cite:
 ```bibtex
 @article{wang2025native,
   title={Native-Resolution Image Synthesis}, 
-  author={Wang, Zidong and Bai, Lei and Yue, Xiangyu and Ouyang, Wanli and Zhang, Yiyuan},
+  author={Wang, Zidong and Zhang, Yiyuan and Yue, Xiaoyu and Yue, Xiangyu and Li, Yangguang and Ouyang, Wanli and Bai, Lei},
   year={2025},
-  eprint={2506.03131},
+  eprint={2509.04394},
   archivePrefix={arXiv},
-  primaryClass={cs.CV}
+  primaryClass={cs.LG}
 }
 ```
-
+https://arxiv.org/abs/
 ## License
 This project is licensed under the Apache-2.0 license.
