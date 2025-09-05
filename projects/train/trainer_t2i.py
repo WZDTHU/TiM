@@ -292,7 +292,7 @@ def main(args):
 
     # transport 
     transport = instantiate_from_config(model_config.transport)
-    loss_fn = TransitionSchedule(transport=transport, **OmegaConf.to_container(model_config.unified_dcm_loss))
+    loss_fn = TransitionSchedule(transport=transport, **OmegaConf.to_container(model_config.transition_loss))
     
     # image encoder
     encoder = radio_model(version=model_config.enc_dir, progress=True, support_packing=False)

@@ -34,7 +34,7 @@
 <b>Highlights</b>: We propose Transition Models (TiM), a novel generative model that learns to navigate the entire generative trajectory with unprecedented flexibility. 
 * Our Transition Models (TiM) are trained to master arbitrary state-to-state transitions. This approach allows TiM to learn the entire solution manifold of the generative process, unifying the few-step and many-step regimes within a single, powerful model. 
   ![Figure](./assets/illustration.png)
-* Despite having only 865M parameters, TiM achieves state-of-the-art performance, surpassing leading models such as SD3.5 (8B parameters) and FLUX.1 (12B parameters) across all evaluated step counts on GenEval benchmark.Importantly, unlike previous few-step generators, TiM demonstrates monotonic quality improvement as the sampling budget increases. 
+* Despite having only 865M parameters, TiM achieves state-of-the-art performance, surpassing leading models such as SD3.5 (8B parameters) and FLUX.1 (12B parameters) across all evaluated step counts on GenEval benchmark. Importantly, unlike previous few-step generators, TiM demonstrates monotonic quality improvement as the sampling budget increases. 
   ![Figure](./assets/nfe_demo.png)
 * Additionally, when employing our native-resolution strategy, TiM delivers exceptional fidelity at resolutions up to $4096\times4096$.
   ![Figure](./assets/tim_demo.png)

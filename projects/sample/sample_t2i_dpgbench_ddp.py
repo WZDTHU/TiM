@@ -27,8 +27,8 @@ from einops import rearrange
 from tim.schedulers.transition import TransitionSchedule
 from tim.utils.misc_utils import instantiate_from_config, init_from_ckpt
 from tim.models.vae import (
-    get_sd_vae, get_va_vae, get_dc_ae,
-    sd_vae_decode, va_vae_decode, dc_ae_decode
+    get_sd_vae, get_dc_ae,
+    sd_vae_decode, dc_ae_decode
 )
 from tim.models.utils.text_encoders import load_text_encoder, encode_prompt
 from safetensors.torch import load_file, save_file
@@ -65,10 +65,6 @@ def main(args):
         sd_vae = get_sd_vae(model_config.vae_dir, dtype=torch.float32, device=device)
         spatial_downsample = 8
         decode_func = functools.partial(sd_vae_decode, sd_vae, slice_vae=args.slice_vae)
-    elif 'va-vae' in model_config.vae_dir:
-        va_vae = get_va_vae(model_config.vae_dir, dtype=torch.float32, device=device)
-        patial_downsample = 16
-        decode_func = functools.partial(va_vae_decode, va_vae, slice_vae=args.slice_vae)
     else: raise
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
     # image resolution
@@ -90,7 +86,7 @@ def main(args):
     model.eval()  # important!
     transport = instantiate_from_config(model_config.transport)
     scheduler = TransitionSchedule(
-        transport=transport, **OmegaConf.to_container(model_config.unified_dcm_loss)
+        transport=transport, **OmegaConf.to_container(model_config.transition_loss)
     )
     
     # Create folder to save samples:
