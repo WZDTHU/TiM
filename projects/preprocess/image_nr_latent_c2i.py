@@ -35,8 +35,8 @@ from torchvision.transforms.functional import hflip
 from safetensors.torch import save_file
 from typing import Any, Callable, cast, Dict, List, Optional, Tuple, Union
 from tim.models.vae import (
-    get_va_vae, get_dc_ae, get_sd_vae,
-    va_vae_encode, dc_ae_encode, sd_vae_encode
+    get_dc_ae, get_sd_vae,
+    dc_ae_encode, sd_vae_encode
 ) 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -280,9 +280,6 @@ def main(args):
     elif 'dc-ae' in model_config.vae:
         dc_ae = get_dc_ae(model_config.vae, weight_dtype, accelerator.device)
         encode_func = functools.partial(dc_ae_encode, dc_ae)
-    elif 'va-vae' in model_config.vae:    
-        va_vae = get_va_vae(model_config.vae, weight_dtype, accelerator.device)
-        encode_func = functools.partial(va_vae_encode, va_vae)
         
         
     
