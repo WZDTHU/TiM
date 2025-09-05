@@ -255,8 +255,8 @@ bash scripts/train/t2i/train_tim_t2i.sh
 ## Citations
 If you find the project useful, please kindly cite: 
 ```bibtex
-@article{wang2025native,
-  title={Native-Resolution Image Synthesis}, 
+@article{wang2025transition,
+  title={Transition Models: Rethinking the Generative Learning Objective}, 
   author={Wang, Zidong and Zhang, Yiyuan and Yue, Xiaoyu and Yue, Xiangyu and Li, Yangguang and Ouyang, Wanli and Bai, Lei},
   year={2025},
   eprint={2509.04394},
