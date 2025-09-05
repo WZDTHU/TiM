@@ -106,7 +106,7 @@ class TransitionSchedule:
         return _dF_dv_dt
     
     @torch.no_grad()
-    def diff_derivative(self, model, x, z, t, r, model_kwargs, rng_state, n_diffusion):
+    def dde_derivative(self, model, x, z, t, r, model_kwargs, rng_state, n_diffusion):
         if n_diffusion == x.size(0):
             return 0
         _dF_dv_dt = torch.zeros_like(x)
@@ -192,7 +192,7 @@ class TransitionSchedule:
         if self.derivative_type == 'jvp':
             dF_dv_dt = self.jvp_derivative(unwrapped_model, x_t, v_t, t, r, model_kwargs, rng_state, n_diffusion)
         else:
-            dF_dv_dt = self.diff_derivative(unwrapped_model, x, z, t, r, model_kwargs, rng_state, n_diffusion)
+            dF_dv_dt = self.dde_derivative(unwrapped_model, x, z, t, r, model_kwargs, rng_state, n_diffusion)
         
         if self.transport.enhance_target:
             F_t_cond, F_t_uncond = self.get_enhanced_target(ema_model, x_t, t, ema_kwargs, null_kwargs, rng_state)
