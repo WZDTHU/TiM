@@ -12,6 +12,7 @@ evaluation metrics via the ADM repo: https://github.com/openai/guided-diffusion/
 For a simple single-GPU/CPU sampling script, see sample.py.
 """
 import torch
+import json
 import torch.distributed as dist
 from diffusers.models import AutoencoderKL, AutoencoderDC
 from tqdm import tqdm
@@ -29,7 +30,9 @@ from tim.models.vae import (
     get_sd_vae, get_dc_ae,
     sd_vae_decode, dc_ae_decode
 )
-from safetensors.torch import load_file
+from tim.models.utils.text_encoders import load_text_encoder, encode_prompt
+from safetensors.torch import load_file, save_file
+import glob
 
 def main(args):
     """
@@ -58,6 +61,7 @@ def main(args):
     if 'dc-ae' in model_config.vae_dir:
         dc_ae = get_dc_ae(model_config.vae_dir, dtype=torch.float32, device=device)
         spatial_downsample = 32
+        dc_ae.enable_tiling(2560, 2560, 2560, 2560)
         decode_func = functools.partial(dc_ae_decode, dc_ae, slice_vae=args.slice_vae)
     elif 'sd-vae' in model_config.vae_dir:
         sd_vae = get_sd_vae(model_config.vae_dir, dtype=torch.float32, device=device)
@@ -69,66 +73,120 @@ def main(args):
     latent_h = int(args.height / spatial_downsample)
     latent_w = int(args.width / spatial_downsample)
 
+    # load text-encoder
+    text_encoder, tokenizer = load_text_encoder(
+        text_encoder_dir=model_config.text_encoder_dir, device=device, weight_dtype=torch.bfloat16
+    )
+    null_cap_feat, null_cap_mask = encode_prompt(
+        tokenizer, text_encoder, device, torch.bfloat16, 
+        [""], model_config.use_last_hidden_state, 
+        max_seq_length=model_config.max_seq_length
+    )
     
     model = instantiate_from_config(model_config.network).to(device=device, dtype=dtype)
-    print(model)
     init_from_ckpt(model, checkpoint_dir=args.ckpt, ignore_keys=None, verbose=True)
     model.eval()  # important!
     
+    transport = instantiate_from_config(model_config.transport)
+    scheduler = TransitionSchedule(
+        transport=transport, **OmegaConf.to_container(model_config.transition_loss)
+    )
+    
+        
     
     # Create folder to save samples:
     model_name = args.ckpt.split('/')[-1].split('.')[0]
-    folder_name = f"{model_name}-{args.height}x{args.width}-T{args.T_min}-{args.T_max}-" \
-                  f"Step-{args.num_steps}-sto-{args.stochasticity_ratio}-{args.sample_type}-" \
-                  f"cfg-{args.cfg_scale}-{args.guidance_low}-{args.guidance_high}"
-    sample_folder_dir = f"{args.sample_dir}/{folder_name}"
+    folder_name = f"tiif-{args.height}x{args.width}-" \
+                  f"Step-{args.num_steps}-cfg-{args.cfg_scale}" 
+    output_folder = os.path.join(args.sample_dir, folder_name)
     if rank == 0:
-        os.makedirs(sample_folder_dir, exist_ok=True)
-        print(f"Saving .png samples at {sample_folder_dir}")
+        os.makedirs(output_folder, exist_ok=True)
+        print(f"Saving .png samples at {output_folder}")
     dist.barrier()
 
     # Figure out how many samples we need to generate on each GPU and how many iterations we need to run:
     n = args.per_proc_batch_size
     global_batch_size = n * dist.get_world_size()
+    
+    # Read all jsonl files and collect all samples
+    jsonl_files = glob.glob(os.path.join(args.caption_dir, "*.jsonl"))
+    all_samples = []  # List of (data_type, short_desc, long_desc, jsonl_filename, idx)
+    
+    for jsonl_file in jsonl_files:
+        with open(jsonl_file, 'r') as file:
+            for idx, line in enumerate(file):
+                data = json.loads(line)
+                data_type = data['type']
+                short_description = data['short_description']
+                long_description = data['long_description']
+                jsonl_filename = os.path.basename(jsonl_file)
+                all_samples.append((data_type, short_description, long_description, jsonl_filename, idx))
+    
+    # Create tasks: each sample needs 2 images (short and long)
+    all_tasks = []
+    for data_type, short_desc, long_desc, jsonl_filename, idx in all_samples:
+        # Task for short description
+        all_tasks.append({
+            'type': data_type,
+            'caption': short_desc.encode('unicode-escape').decode('utf-8'),
+            'desc_type': 'short_description',
+            'jsonl_filename': jsonl_filename,
+            'idx': idx
+        })
+        # Task for long description
+        all_tasks.append({
+            'type': data_type,
+            'caption': long_desc.encode('unicode-escape').decode('utf-8'),
+            'desc_type': 'long_description',
+            'jsonl_filename': jsonl_filename,
+            'idx': idx
+        })
+    
+    total_samples = len(all_tasks)
     # To make things evenly-divisible, we'll sample a bit more than we need and then discard the extra samples:
-    total_samples = int(math.ceil(args.num_fid_samples / global_batch_size) * global_batch_size)
+    total_samples_padded = int(math.ceil(total_samples / global_batch_size) * global_batch_size)
+    pad_num = total_samples_padded - total_samples
+    all_tasks.extend(all_tasks[:pad_num] if pad_num > 0 else [])
+    
+    all_captions = [task['caption'] for task in all_tasks]
+    all_paths = []
+    for task in all_tasks:
+        type_dir = os.path.join(output_folder, task['type'], model_name)
+        desc_dir = os.path.join(type_dir, task['desc_type'])
+        all_paths.append(desc_dir)
+
     if rank == 0:
-        print(f"Total number of images that will be sampled: {total_samples}")
+        print(f"Total number of images that will be sampled: {total_samples_padded}")
         print(f"Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    assert total_samples % dist.get_world_size() == 0, "total_samples must be divisible by world_size"
-    samples_needed_this_gpu = int(total_samples // dist.get_world_size())
-    assert samples_needed_this_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
-    iterations = int(samples_needed_this_gpu // n)
+    assert total_samples_padded % dist.get_world_size() == 0, "total_samples_padded must be divisible by world_size"
+    samples_per_gpu = int(total_samples_padded // dist.get_world_size())
+    assert samples_per_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    iterations = int(samples_per_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar
     total = 0
-    for i in pbar:
-        
-        # Sample inputs:
+
+
+    for index in pbar:
         z = torch.randn(
             (n, model.in_channels, latent_h, latent_w), 
             device=device, dtype=dtype
         )
-        y = torch.randint(0, args.num_classes, (n,), device=device)
-        y_null = torch.tensor([1000] * y.size(0), device=y.device)
-            
         
-        can_pass = True
-        for j in range(n):
-            index = j * dist.get_world_size() + rank + total
-            if not os.path.exists(f"{sample_folder_dir}/{index:06d}.png"):
-                can_pass = False
-        if can_pass:
-            total += global_batch_size
-            print('total: ', total)
-            continue
+        captions = all_captions[samples_per_gpu*rank+n*index: samples_per_gpu*rank+n*(index+1)]
+        cap_features, cap_mask = encode_prompt(
+            tokenizer, text_encoder, device, dtype, captions, 
+            model_config.use_last_hidden_state, max_seq_length=model_config.max_seq_length
+        )
+                
+        cur_max_seq_len = cap_mask.sum(dim=-1).max()
+        y = cap_features[:, : cur_max_seq_len]
+
+        y_null = null_cap_feat[:, : cur_max_seq_len]
+        y_null = y_null.expand(y.shape[0], cur_max_seq_len, null_cap_feat.shape[-1])
+        
 
         # Sample images:
-        transport = instantiate_from_config(model_config.transport)
-        scheduler = TransitionSchedule(
-            transport=transport, **OmegaConf.to_container(model_config.transition_loss)
-        )
-    
         with torch.no_grad():
             samples = scheduler.sample(
                 model, y, y_null, z, 
@@ -142,18 +200,24 @@ def main(args):
                 sample_type=args.sample_type,
             )[-1]
             samples = samples.to(torch.float32)
-            samples = decode_func(samples)
-
-            samples = (samples + 1) / 2.
-            samples = torch.clamp(
-                255. * samples, 0, 255
-            ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-
+        samples = decode_func(samples)
+        
+        paths = all_paths[samples_per_gpu*rank+n*index: samples_per_gpu*rank+n*(index+1)]
+        tasks = all_tasks[samples_per_gpu*rank+n*index: samples_per_gpu*rank+n*(index+1)]
+        
+        # Create directories
+        for path in paths:
+            os.makedirs(path, exist_ok=True)
+        
+        # Convert to uint8 and save
+        samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to(torch.uint8).contiguous()
         # Save samples to disk as individual .png files
-        for i, sample in enumerate(samples):
-            index = i * dist.get_world_size() + rank + total
-            Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
+        for i, image in enumerate(samples.cpu().numpy()):
+            # image shape: (H, W, C) for PIL
+            image_path = os.path.join(paths[i], f"{tasks[i]['idx']}.png")
+            Image.fromarray(image).save(image_path)
         total += global_batch_size
+
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
     dist.barrier()
@@ -176,15 +240,17 @@ if __name__ == "__main__":
     # logging/saving:
     parser.add_argument("--config", type=str, default=None, help="Optional config to a SiT checkpoint.")
     parser.add_argument("--ckpt", type=str, default=None, help="Optional path to a SiT checkpoint.")
-    parser.add_argument("--sample-dir", type=str, default="")
+    parser.add_argument("--sample-dir", type=str, default="", help="Output directory for generated images")
+    parser.add_argument("--data-type", type=str, default="geneval")
+    parser.add_argument("--caption-dir", type=str, default="", help="Directory containing jsonl files with prompts")
 
 
     # model
-    parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--slice_vae", action=argparse.BooleanOptionalAction, default=False) # only for ode
-    
+    parser.add_argument("--save-latent", action=argparse.BooleanOptionalAction, default=False)
+
     # number of samples
     parser.add_argument("--per-proc-batch-size", type=int, default=32)
     parser.add_argument("--num-fid-samples", type=int, default=50_000)

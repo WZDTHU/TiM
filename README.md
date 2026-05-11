@@ -59,7 +59,8 @@ git clone https://github.com/WZDTHU/TiM.git && cd TiM
 conda create -n tim_env python=3.10
 conda activate tim_env
 pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118
-pip install flash-attn
+pip install ninja
+pip install flash-attn  --no-build-isolation
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -95,6 +96,8 @@ wget -c "https://huggingface.co/GoodEnough/TiM-T2I/resolve/main/t2i_model.bin" -
 mkdir checkpoints
 wget -c "https://huggingface.co/GoodEnough/TiM-C2I/resolve/main/c2i_model_256.safetensors" -O checkpoints/c2i_model_256.safetensors
 wget -c "https://huggingface.co/GoodEnough/TiM-C2I/resolve/main/c2i_model_512.safetensors" -O checkpoints/c2i_model_512.safetensors
+wget -c "https://huggingface.co/GoodEnough/TiM-C2I/resolve/main/c2i_plus_256.safetensors" -O checkpoints/c2i_plus_256.safetensors
+wget -c "https://huggingface.co/GoodEnough/TiM-C2I/resolve/main/c2i_plus_512.safetensors" -O checkpoints/c2i_plus_512.safetensors
 ```
 
 

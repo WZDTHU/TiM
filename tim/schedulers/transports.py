@@ -23,6 +23,70 @@ class Transport:
     def from_x_t_to_x_r(self, x_t: torch.Tensor, t: torch.Tensor, r: torch.Tensor, F: torch.Tensor):
         pass
 
+
+pi = torch.pi
+
+
+class OPT_1(Transport):
+    def __init__(self, P_mean=0.0, P_std=1.0, sigma_d=1.0, T_max=1.0, T_min=0.0, enhance_target=False, w_cond=0.0, w_start=0.0, w_end=1.0):
+        '''
+        Flow-matching with linear path formulation from the paper:
+        "SiT: Exploring Flow and Diffusion-based Generative Models with Scalable Interpolant Transformers"
+        '''
+        self.P_mean = P_mean
+        self.P_std = P_std
+        super().__init__(sigma_d, T_max, T_min, enhance_target, w_cond, w_start, w_end)
+        
+    def interpolant(self, x: torch.Tensor, z: torch.Tensor, t: torch.Tensor):
+        alpha_t = torch.cos(pi/2*t)
+        sigma_t = torch.sin(pi/2*t)
+        x_t = alpha_t * x + sigma_t * z
+        return x_t
+
+    def sample_t(self, batch_size, dtype, device):
+        rnd_normal = torch.randn((batch_size, ), dtype=dtype, device=device)
+        sigma = (rnd_normal * self.P_std + self.P_mean).exp()
+        t = sigma / (1 + sigma)     # [0, 1]
+        t = t.clip(self.T_min, self.T_max)
+        return t
+
+    def c_noise(self, t: torch.Tensor):
+        return t
+    
+    def target(
+        self, 
+        x: torch.Tensor, 
+        z: torch.Tensor, 
+        t: torch.Tensor, 
+        r: torch.Tensor, 
+        dF_dv_dt: torch.Tensor,
+        F_cond: Optional[torch.Tensor] = 0.0, 
+        F_uncond: Optional[torch.Tensor] = 0.0, 
+        enhance_target = False,
+    ):
+        diffusion_target = z - x
+        coefficient = 2/pi * torch.sin(pi/2*(t-r)) * torch.sin(pi/2*t+pi/4) / torch.sin(pi/2*r+pi/4)
+        F_target = diffusion_target - coefficient * dF_dv_dt
+        if enhance_target:
+            # w_cond = torch.where((t>=self.w_start) & (t<=self.w_end), self.w_cond, 0.0)
+            w_cond = torch.where((t>=self.w_start) & (t<=self.w_end) & (r>=self.w_start) & (r<=self.w_end), self.w_cond, 0.0)
+            F_target = F_target + w_cond * (F_cond - F_uncond)
+        return F_target
+    
+    def from_x_t_to_x_r(self, x_t: torch.Tensor, t: torch.Tensor, r: torch.Tensor, F: torch.Tensor, s_ratio=0.0):
+        A = (torch.cos(pi/2*r) + torch.sin(pi/2*r)) / (torch.cos(pi/2*t) + torch.sin(pi/2*t))
+        B = - torch.sin(pi/2*(t-r)) / (torch.cos(pi/2*t) + torch.sin(pi/2*t))
+        x_r = A * x_t + B * F
+        if s_ratio > 0.0:
+            z = (x_t + torch.cos(pi/2*t) * F) / (torch.cos(pi/2*t) + torch.sin(pi/2*t)) # an approximation of z
+            epsilon = torch.randn_like(z)
+            dt = t-r
+            x_r = x_r - s_ratio * pi/2 * z * dt + torch.sqrt(s_ratio*pi*torch.sin(pi/2*t)*dt) * epsilon
+        return x_r
+    
+
+
+
 class OT_FM(Transport):
     def __init__(self, P_mean=0.0, P_std=1.0, sigma_d=1.0, T_max=1.0, T_min=0.0, enhance_target=False, w_gt=1.0, w_cond=0.0, w_start=0.0, w_end=1.0):
         '''
